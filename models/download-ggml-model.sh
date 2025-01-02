@@ -72,21 +72,58 @@ list_models() {
     printf "\n\n"
 }
 
-if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
-    printf "Usage: %s <model> [models_path]\n" "$0"
+# Function to show help/usage
+show_help() {
+    printf "Usage: %s <model> [models_path] [-s|--silent]\n" "$0"
     list_models
-    printf "___________________________________________________________\n"
+    printf "___________________________________________________\n"
     printf "${BOLD}.en${RESET} = english-only ${BOLD}-q5_[01]${RESET} = quantized ${BOLD}-tdrz${RESET} = tinydiarize\n"
+    printf "Options:\n"
+    printf "  -s, --silent    Suppress download progress output\n"
+}
 
-    exit 1
+silent_mode=0
+models_path=""
+model=""
+
+# Show help if no arguments provided
+if [ $# -eq 0 ]; then
+    show_help
+    exit 0
 fi
 
-model=$1
+# Parse arguments
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -s|--silent)
+            silent_mode=1
+            shift
+            ;;
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        *)
+            if [ -z "$model" ]; then
+                model="$1"
+            elif [ -z "$models_path" ]; then
+                models_path="$1"
+            else
+                show_help
+                exit 1
+            fi
+            shift
+            ;;
+    esac
+done
+
+if [ -z "$models_path" ]; then
+    models_path="$(get_script_path)"
+fi
 
 if ! echo "$models" | grep -q -w "$model"; then
     printf "Invalid model: %s\n" "$model"
     list_models
-
     exit 1
 fi
 
@@ -110,11 +147,23 @@ if [ -f "ggml-$model.bin" ]; then
 fi
 
 if [ -x "$(command -v wget2)" ]; then
-    wget2 --no-config --progress bar -O ggml-"$model".bin $src/$pfx-"$model".bin
+    if [ $silent_mode -eq 1 ]; then
+        wget2 --no-config -q -O ggml-"$model".bin $src/$pfx-"$model".bin
+    else
+        wget2 --no-config --progress bar -O ggml-"$model".bin $src/$pfx-"$model".bin
+    fi
 elif [ -x "$(command -v wget)" ]; then
-    wget --no-config --quiet --show-progress -O ggml-"$model".bin $src/$pfx-"$model".bin
+    if [ $silent_mode -eq 1 ]; then
+        wget --no-config -q -O ggml-"$model".bin $src/$pfx-"$model".bin
+    else
+        wget --no-config --quiet --show-progress -O ggml-"$model".bin $src/$pfx-"$model".bin
+    fi
 elif [ -x "$(command -v curl)" ]; then
-    curl -L --output ggml-"$model".bin $src/$pfx-"$model".bin
+    if [ $silent_mode -eq 1 ]; then
+        curl -sL --output ggml-"$model".bin $src/$pfx-"$model".bin
+    else
+        curl -L --output ggml-"$model".bin $src/$pfx-"$model".bin
+    fi
 else
     printf "Either wget or curl is required to download models.\n"
     exit 1
