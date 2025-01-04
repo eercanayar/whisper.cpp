@@ -3,6 +3,7 @@
 // A very quick-n-dirty implementation serving mainly as a proof of concept.
 //
 #include <zmq.hpp>
+#include "common.h"
 #include "whisper.h"
 
 #include <cassert>
@@ -301,6 +302,7 @@ int main(int argc, char ** argv) {
             }
 
             // print result;
+                        // print result;
             {
                 if (!use_vad) {
                     printf("\33[2K\r");
@@ -359,25 +361,26 @@ int main(int argc, char ** argv) {
                     printf("### Transcription %d END\n", n_iter);
                 }
             }
-
-        ++n_iter;
+            
+            ++n_iter;
         
-        if (!use_vad && (n_iter % n_new_line) == 0) {
-            printf("\n");
-            pcmf32_old = std::vector<float>(pcmf32.end() - n_samples_keep, pcmf32.end());
+            if (!use_vad && (n_iter % n_new_line) == 0) {
+                printf("\n");
+                pcmf32_old = std::vector<float>(pcmf32.end() - n_samples_keep, pcmf32.end());
 
-            if (!params.no_context) {
-                prompt_tokens.clear();
-                const int n_segments = whisper_full_n_segments(ctx);
-                for (int i = 0; i < n_segments; ++i) {
-                    const int token_count = whisper_full_n_tokens(ctx, i);
-                    for (int j = 0; j < token_count; ++j) {
-                        prompt_tokens.push_back(whisper_full_get_token_id(ctx, i, j));
+                if (!params.no_context) {
+                    prompt_tokens.clear();
+                    const int n_segments = whisper_full_n_segments(ctx);
+                    for (int i = 0; i < n_segments; ++i) {
+                        const int token_count = whisper_full_n_tokens(ctx, i);
+                        for (int j = 0; j < token_count; ++j) {
+                            prompt_tokens.push_back(whisper_full_get_token_id(ctx, i, j));
+                        }
                     }
                 }
             }
+            fflush(stdout);
         }
-        fflush(stdout);
     }
 
     whisper_print_timings(ctx);

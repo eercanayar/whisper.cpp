@@ -107,6 +107,8 @@ else()
     add_subdirectory(bench)
     add_subdirectory(server)
     add_subdirectory(quantize)
+    add_subdirectory(stream-mq)
+
     if (WHISPER_SDL2)
         add_subdirectory(stream)
         add_subdirectory(command)
