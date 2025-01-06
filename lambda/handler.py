@@ -5,12 +5,61 @@ import subprocess
 import threading
 import time
 import os
+from difflib import SequenceMatcher
 
 TERM_SIGNAL = "<TERM>"
 NO_INPUT_TIMEOUT = 15  # seconds
 NO_OUTPUT_TIMEOUT = 20  # seconds
 
-# Python Lambda
+
+class TranscriptionMerger:
+    def __init__(self):
+        self.current_transcript = ""
+        self.similarity_threshold = 0.85
+        
+    def get_similarity(self, text1, text2):
+        return SequenceMatcher(None, text1, text2).ratio()
+    
+    def merge_transcripts(self, new_text):
+        new_text = new_text.replace("[ Silence ]", "").strip()
+        
+        if not self.current_transcript:
+            self.current_transcript = new_text
+            return new_text, new_text
+
+        # Look for the new text as a substring within the current transcript
+        # but focus on the end portion
+        end_portion = self.current_transcript[-len(new_text)*2:]  # Look at the last 2x portion
+        
+        # Find the longest common substring between the end portion and new text
+        longest_common = ""
+        for i in range(len(end_portion)):
+            for j in range(i + 10, len(end_portion) + 1):  # Minimum 10 chars
+                substring = end_portion[i:j]
+                if substring in new_text:
+                    if len(substring) > len(longest_common):
+                        longest_common = substring
+
+        if longest_common and len(longest_common) >= 10:
+            # Find where the common part starts in both texts
+            common_start_current = self.current_transcript.rfind(longest_common)
+            common_start_new = new_text.find(longest_common)
+            
+            # Keep the text up to the common part from current transcript
+            # and add the new content after the common part from new text
+            merged = (self.current_transcript[:common_start_current + len(longest_common)] + 
+                    new_text[common_start_new + len(longest_common):])
+            
+            new_content = new_text[common_start_new + len(longest_common):]
+            self.current_transcript = merged
+            return merged, new_content
+        else:
+            # If no significant overlap found, treat as new segment
+            self.current_transcript = new_text
+            return new_text, new_text
+
+        return self.current_transcript, ""
+
 def setup_zmq_sockets():
     context = zmq.Context()
     
@@ -73,9 +122,8 @@ def start_whisper_process():
         print(f"Error starting whisper process: {e}")
         return None, None, None
 
-# Modify process_output_messages function
 def process_output_messages(pull_socket, sqs_client, output_queue_url):
-    """Process output messages from whisper-stream-mq"""
+    merger = TranscriptionMerger()
     received_first_output = False
     last_output_time = time.time()
     
@@ -84,7 +132,7 @@ def process_output_messages(pull_socket, sqs_client, output_queue_url):
             text = pull_socket.recv_string(flags=zmq.NOBLOCK)
             if text:
                 if text == TERM_SIGNAL:
-                    # Whisper acknowledged termination
+                    # Send termination signal
                     sqs_client.send_message(
                         QueueUrl=output_queue_url,
                         MessageBody=TERM_SIGNAL,
@@ -95,9 +143,22 @@ def process_output_messages(pull_socket, sqs_client, output_queue_url):
                 else:
                     received_first_output = True
                     last_output_time = time.time()
+                    
+                    # Process text through merger
+                    full_text, new_part = merger.merge_transcripts(text)
+                    
+                    # Create message payload
+                    message_payload = {
+                        'raw_transcription': text,
+                        'stable': {
+                            'full_transcript': full_text,
+                            'new_text': new_part
+                        }
+                    }
+                    
                     sqs_client.send_message(
                         QueueUrl=output_queue_url,
-                        MessageBody=text,
+                        MessageBody=json.dumps(message_payload),
                         MessageGroupId='transcription',
                         MessageDeduplicationId=str(time.time())
                     )

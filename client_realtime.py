@@ -153,7 +153,7 @@ def main(wav_path):
     input_queue_url, output_queue_url = create_sqs_queues(sqs_client, 'whisper-stream')
     
     print(f"\nUse this command to subscribe to transcriptions:")
-    print(f"python3 client_realtime_transcription_v2.py --queue-url {output_queue_url}\n")
+    print(f"python3 client_realtime_transcription_v3.py --queue-url {output_queue_url}\n")
  
     # Invoke Lambda function
     invoke_lambda_function(
