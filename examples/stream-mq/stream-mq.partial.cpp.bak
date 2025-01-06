@@ -224,47 +224,6 @@ int main(int argc, char ** argv) {
     auto t_last = std::chrono::high_resolution_clock::now();
     const auto t_start = t_last;
 
-    // Initial buffer filling from any waiting ZMQ messages
-    {
-        fprintf(stderr, "Consuming initial messages from ZMQ queue...\n");
-        size_t filled = 0;
-        
-        while (filled < n_samples_len) {
-            zmq::message_t message;
-            
-            // Try to receive message with NO_WAIT flag
-            auto result = audio_socket.recv(message, zmq::recv_flags::dontwait);
-            if (!result.has_value()) {
-                // No more messages waiting
-                break;
-            }
-
-            // Check for TERM signal
-            if (message.size() == TERM_SIGNAL.size() && 
-                memcmp(message.data(), TERM_SIGNAL.data(), message.size()) == 0) {
-                text_socket.send(zmq::buffer(TERM_SIGNAL.data(), TERM_SIGNAL.size()));
-                fprintf(stderr, "Received termination signal during initial buffer filling\n");
-                return 0;
-            }
-
-            // Convert and append received data
-            const float* received_data = static_cast<const float*>(message.data());
-            const size_t n_samples = message.size() / sizeof(float);
-            
-            size_t samples_to_copy = std::min(n_samples, n_samples_len - filled);
-            std::copy(received_data, received_data + samples_to_copy, pcmf32.begin() + filled);
-            filled += samples_to_copy;
-
-            if (params.save_audio) {
-                wavWriter.write(received_data, samples_to_copy);
-            }
-        }
-        
-        fprintf(stderr, "Initial buffer filled with %zu samples (%.2f seconds)\n", 
-                filled, 
-                float(filled) / WHISPER_SAMPLE_RATE);
-    }
-
     // Main processing loop
     while (is_running) {
         zmq::message_t message;
@@ -297,23 +256,16 @@ int main(int argc, char ** argv) {
         // Process audio data
         if (!use_vad) {
             const int n_samples_new = pcmf32_new.size();
-            
-            if (pcmf32.size() < n_samples_len) {
-                // Still filling initial buffer
-                pcmf32.insert(pcmf32.end(), pcmf32_new.begin(), pcmf32_new.end());
-                if (pcmf32.size() > n_samples_len) {
-                    // If we overshot, trim to exact length
-                    pcmf32.resize(n_samples_len);
-                }
-            } else {
-                // Buffer is full (size == n_samples_len)
-                // Shift existing data left
-                std::copy(pcmf32.begin() + n_samples_new, pcmf32.end(), pcmf32.begin());
-                // Copy new data to end
-                std::copy(pcmf32_new.begin(), pcmf32_new.end(), pcmf32.end() - n_samples_new);
+            const int n_samples_take = std::min((int)pcmf32_old.size(), 
+                                              std::max(0, n_samples_keep + n_samples_len - n_samples_new));
+
+            pcmf32.resize(n_samples_new + n_samples_take);
+
+            for (int i = 0; i < n_samples_take; i++) {
+                pcmf32[i] = pcmf32_old[pcmf32_old.size() - n_samples_take + i];
             }
-            
-            // Keep a copy
+
+            memcpy(pcmf32.data() + n_samples_take, pcmf32_new.data(), n_samples_new * sizeof(float));
             pcmf32_old = pcmf32;
         } else {
             const auto t_now = std::chrono::high_resolution_clock::now();
@@ -427,7 +379,7 @@ int main(int argc, char ** argv) {
         
             if (!use_vad && (n_iter % n_new_line) == 0) {
                 printf("\n");
-                //pcmf32_old = std::vector<float>(pcmf32.end() - n_samples_keep, pcmf32.end());
+                pcmf32_old = std::vector<float>(pcmf32.end() - n_samples_keep, pcmf32.end());
 
                 if (!params.no_context) {
                     prompt_tokens.clear();

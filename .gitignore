@@ -58,3 +58,5 @@ cmake-build-debug/
 .cxx/
 .gradle/
 local.properties
+
+/third_party/
