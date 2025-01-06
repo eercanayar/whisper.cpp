@@ -115,7 +115,10 @@ void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params & para
 
 int main(int argc, char ** argv) {
     whisper_params params;
-
+    
+    bool first_run = true;
+    bool termination_requested = false;
+    
     if (whisper_params_parse(argc, argv, params) == false) {
         return 1;
     }
@@ -224,12 +227,32 @@ int main(int argc, char ** argv) {
     auto t_last = std::chrono::high_resolution_clock::now();
     const auto t_start = t_last;
 
-    // Initial buffer filling from any waiting ZMQ messages
-    {
-        fprintf(stderr, "Consuming initial messages from ZMQ queue...\n");
-        size_t filled = 0;
-        
-        while (filled < n_samples_len) {
+    // Pre-calculate max_messages values for different scenarios
+    const int initial_max_messages = (params.length_ms * WHISPER_SAMPLE_RATE / 1000) / (n_samples_step);
+    const int subsequent_max_messages = (params.length_ms * WHISPER_SAMPLE_RATE / 2000) / (n_samples_step);
+
+    fprintf(stderr, "Max messages per iteration: initial=%d, subsequent=%d\n", 
+            initial_max_messages, subsequent_max_messages);
+
+    // Main processing loop
+    while (is_running) {
+        // Set max_messages based on current state
+        int max_messages = (first_run) 
+            ? initial_max_messages 
+            : subsequent_max_messages;
+
+        fprintf(stderr, "Debug: iter=%d first_run=%d pcmf32.size=%zu n_samples_len=%d max_messages=%d (initial=%d subsequent=%d)\n",
+            n_iter,
+            (int)first_run,
+            pcmf32.size(),
+            n_samples_len,
+            max_messages,
+            initial_max_messages,
+            subsequent_max_messages);
+
+        // Process messages up to calculated limit
+        int msg_count = 0;
+        for (; msg_count < max_messages; msg_count++) {
             zmq::message_t message;
             
             // Try to receive message with NO_WAIT flag
@@ -242,80 +265,49 @@ int main(int argc, char ** argv) {
             // Check for TERM signal
             if (message.size() == TERM_SIGNAL.size() && 
                 memcmp(message.data(), TERM_SIGNAL.data(), message.size()) == 0) {
-                text_socket.send(zmq::buffer(TERM_SIGNAL.data(), TERM_SIGNAL.size()));
-                fprintf(stderr, "Received termination signal during initial buffer filling\n");
-                return 0;
+                termination_requested = true;
+                // Don't exit immediately - continue processing
+                continue;
             }
 
-            // Convert and append received data
+            // Convert received data
             const float* received_data = static_cast<const float*>(message.data());
             const size_t n_samples = message.size() / sizeof(float);
             
-            size_t samples_to_copy = std::min(n_samples, n_samples_len - filled);
-            std::copy(received_data, received_data + samples_to_copy, pcmf32.begin() + filled);
-            filled += samples_to_copy;
-
+            // Save audio if enabled
             if (params.save_audio) {
-                wavWriter.write(received_data, samples_to_copy);
+                wavWriter.write(received_data, n_samples);
             }
-        }
-        
-        fprintf(stderr, "Initial buffer filled with %zu samples (%.2f seconds)\n", 
-                filled, 
-                float(filled) / WHISPER_SAMPLE_RATE);
-    }
 
-    // Main processing loop
-    while (is_running) {
-        zmq::message_t message;
-        
-        // Receive audio data
-        auto result = audio_socket.recv(message, zmq::recv_flags::none);
-        if (!result.has_value()) {
-            continue;
-        }
-
-        // Check if it's a TERM signal
-        if (message.size() == TERM_SIGNAL.size() && 
-            memcmp(message.data(), TERM_SIGNAL.data(), message.size()) == 0) {
-            // Send acknowledgement back
-            text_socket.send(zmq::buffer(TERM_SIGNAL.data(), TERM_SIGNAL.size()));
-            fprintf(stderr, "Received termination signal, shutting down\n");
-            break;
-        }
-
-        // Convert received data to float array
-        const float* received_data = static_cast<const float*>(message.data());
-        const size_t n_samples = message.size() / sizeof(float);
-        
-        pcmf32_new.assign(received_data, received_data + n_samples);
-
-        if (params.save_audio) {
-            wavWriter.write(pcmf32_new.data(), pcmf32_new.size());
-        }
-
-        // Process audio data
-        if (!use_vad) {
-            const int n_samples_new = pcmf32_new.size();
-            
-            if (pcmf32.size() < n_samples_len) {
-                // Still filling initial buffer
-                pcmf32.insert(pcmf32.end(), pcmf32_new.begin(), pcmf32_new.end());
-                if (pcmf32.size() > n_samples_len) {
-                    // If we overshot, trim to exact length
-                    pcmf32.resize(n_samples_len);
+            // Handle the audio data
+            if (!use_vad) {
+                // If buffer isn't full yet
+                if (pcmf32.size() < n_samples_len) {
+                    size_t space_left = n_samples_len - pcmf32.size();
+                    size_t samples_to_copy = std::min(n_samples, space_left);
+                    pcmf32.insert(pcmf32.end(), received_data, received_data + samples_to_copy);
+                } else {
+                    // Shift existing data left by n_samples
+                    std::copy(pcmf32.begin() + n_samples, pcmf32.end(), pcmf32.begin());
+                    // Copy new data to end
+                    std::copy(received_data, received_data + n_samples, pcmf32.end() - n_samples);
                 }
             } else {
-                // Buffer is full (size == n_samples_len)
-                // Shift existing data left
-                std::copy(pcmf32.begin() + n_samples_new, pcmf32.end(), pcmf32.begin());
-                // Copy new data to end
-                std::copy(pcmf32_new.begin(), pcmf32_new.end(), pcmf32.end() - n_samples_new);
+                // For VAD mode, just store the latest chunk
+                pcmf32_new.assign(received_data, received_data + n_samples);
             }
-            
-            // Keep a copy
-            pcmf32_old = pcmf32;
-        } else {
+        }
+
+        if (msg_count == 0) {
+            // No messages received this iteration, sleep to prevent CPU spinning
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            continue;  // Skip processing if no new data
+        }
+
+        fprintf(stderr, ">>> %d of messages pulled\n", msg_count);
+
+        // VAD-specific timing check
+        if (use_vad) {
             const auto t_now = std::chrono::high_resolution_clock::now();
             const auto t_diff = std::chrono::duration_cast<std::chrono::milliseconds>(t_now - t_last).count();
 
@@ -324,13 +316,18 @@ int main(int argc, char ** argv) {
             }
 
             if (::vad_simple(pcmf32_new, WHISPER_SAMPLE_RATE, 1000, params.vad_thold, 
-                           params.freq_thold, false)) {
+                        params.freq_thold, false)) {
                 pcmf32 = pcmf32_new;
             } else {
                 continue;
             }
 
             t_last = t_now;
+        }
+
+        // Keep a copy for non-VAD mode
+        if (!use_vad) {
+            pcmf32_old = pcmf32;
         }
 
         // run the inference
@@ -364,7 +361,6 @@ int main(int argc, char ** argv) {
             }
 
             // print result;
-                        // print result;
             {
                 if (!use_vad) {
                     printf("\33[2K\r");
@@ -441,6 +437,16 @@ int main(int argc, char ** argv) {
                 }
             }
             fflush(stdout);
+        }
+
+        // After processing, update first_run flag
+        first_run = false;
+
+        // Check if we should terminate after processing
+        if (termination_requested) {
+            text_socket.send(zmq::buffer(TERM_SIGNAL.data(), TERM_SIGNAL.size()));
+            fprintf(stderr, "Processed all buffered messages, terminating\n");
+            break;
         }
     }
 

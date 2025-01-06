@@ -54,6 +54,10 @@ def start_whisper_process():
                 "/home/ec2-user/whisper-mq/whisper.cpp/build/bin/whisper-stream-mq",
                 "--model",
                 "/home/ec2-user/whisper-mq/whisper.cpp/models/ggml-base.en.bin",
+                "--length",
+                "20000",
+                "--step",
+                "2000"
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -209,17 +213,33 @@ def lambda_handler(event, context):
                     # Now wait for output_thread to receive the TERM response
                     break
                     
+                # Replace the "Process audio data" try-block with this:
                 # Process audio data
                 try:
                     audio_data = bytes.fromhex(message['Body'])
-                    try:
-                        push_socket.send(audio_data)
-                    except zmq.Again:
-                        print("Socket buffer full - would block")
-                    except Exception as e:
-                        print(f"Error sending message: {e}")
-                    last_message_time = current_time
+                    send_success = False
+                    retry_start_time = current_time
                     
+                    while not send_success:
+                        try:
+                            push_socket.send(audio_data)
+                            send_success = True
+                            last_message_time = current_time
+                        except zmq.Again:
+                            # Check if we've hit the no input timeout while retrying
+                            if time.time() - last_message_time > NO_INPUT_TIMEOUT:
+                                print("No input timeout reached while retrying send, initiating termination")
+                                push_socket.send_string(TERM_SIGNAL)
+                                break
+                            print("Socket buffer full - retrying")
+                            time.sleep(0.1)  # Small sleep to prevent tight loop
+                        except Exception as e:
+                            print(f"Error sending message: {e}")
+                            break
+                    
+                    if not send_success:
+                        break  # Exit the main loop if we couldn't send due to timeout
+                        
                 except Exception as e:
                     print(f"Error processing message: {e}")
                 
